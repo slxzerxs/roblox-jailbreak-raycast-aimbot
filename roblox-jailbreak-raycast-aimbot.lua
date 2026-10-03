@@ -1,25 +1,45 @@
--- v1.1.0
+-- v1.3.0
 local userInputService = game:GetService("UserInputService")
 local players = game:GetService("Players")
 local localPlayer = players.LocalPlayer
 local workspaceService = game:GetService("Workspace")
 local runService = game:GetService("RunService")
+local replicatedStorage = game:GetService("ReplicatedStorage")
 
-local rayModule = require(
-    game:GetService("ReplicatedStorage").Module.RayCast
-)
+local rayModule = require(replicatedStorage:WaitForChild("Module"):WaitForChild("RayCast"))
+
+local stdRaycastModule
+pcall(function()
+    stdRaycastModule = require(replicatedStorage:WaitForChild("Std"):WaitForChild("Raycast"))
+end)
 
 getgenv().MaxDistance = 600
-getgenv().OriginalRaycast =
-    getgenv().OriginalRaycast
-    or rayModule.RayIgnoreNonCollideWithIgnoreList
+getgenv().OriginalRaycast = getgenv().OriginalRaycast or rayModule.RayIgnoreNonCollideWithIgnoreList
+
+if stdRaycastModule then
+    getgenv().OriginalStdCollidable = getgenv().OriginalStdCollidable or stdRaycastModule.collidable
+end
 
 local isHoldingAimKey = false
 local npcCache = {}
 local lastNpcUpdate = 0
 
+local function isBulletCollidable(part)
+    if not part or not part:IsA("BasePart") then
+        return false
+    end
+    if part:GetAttribute("InvisibleToBullets") == true then
+        return false
+    end
+    return true
+end
+
 local function isNPC(model)
-    if not model:IsA("Model") then
+    if not model or not model:IsA("Model") then
+        return false
+    end
+
+    if model:GetAttribute("InvisibleToBullets") == true then
         return false
     end
 
@@ -46,7 +66,6 @@ local function isNPC(model)
     local parent = model.Parent
     if parent then
         local parentName = string.upper(parent.Name)
-
         if string.find(parentName, "NPC") then return true end
         if string.find(parentName, "BOSS") then return true end
     end
@@ -65,40 +84,38 @@ local function findNearestNPC(rootPosition)
         npcCache = {}
 
         local checkedModels = {}
-        local nearbyParts =
-            workspaceService:GetPartBoundsInRadius(rootPosition, maxDistance)
+        local nearbyParts = workspaceService:GetPartBoundsInRadius(rootPosition, maxDistance)
 
         for _, part in ipairs(nearbyParts) do
-            local model = part:FindFirstAncestorOfClass("Model")
+            if isBulletCollidable(part) then
+                local model = part:FindFirstAncestorOfClass("Model")
 
-            while model do
-                if not checkedModels[model] then
-                    checkedModels[model] = true
+                while model do
+                    if not checkedModels[model] then
+                        checkedModels[model] = true
 
-                    if isNPC(model) then
-                        local rootPart =
-                            model:FindFirstChild("HumanoidRootPart")
+                        if isNPC(model) then
+                            local rootPart = model:FindFirstChild("HumanoidRootPart")
 
-                        if rootPart then
-                            local position = rootPart.Position
-                            local distance =
-                                (position - rootPosition).Magnitude
+                            if rootPart then
+                                local position = rootPart.Position
+                                local distance = (position - rootPosition).Magnitude
 
-                            if distance <= maxDistance then
-                                table.insert(npcCache, {
-                                    Object = model,
-                                    HRP = rootPart,
-                                    Position = position,
-                                    Name = model.Name
-                                })
+                                if distance <= maxDistance then
+                                    table.insert(npcCache, {
+                                        Object = model,
+                                        HRP = rootPart,
+                                        Position = position,
+                                        Name = model.Name
+                                    })
+                                end
                             end
                         end
                     end
-                end
 
-                local parent = model.Parent
-                model = parent
-                    and parent:FindFirstAncestorOfClass("Model")
+                    local parent = model.Parent
+                    model = parent and parent:FindFirstAncestorOfClass("Model")
+                end
             end
         end
     end
@@ -122,10 +139,9 @@ local function findNearestPlayer(rootPosition)
     for _, player in ipairs(players:GetPlayers()) do
         if player ~= localPlayer and player.Team ~= localPlayer.Team then
             local character = player.Character
-            local rootPart = character
-                and character:FindFirstChild("HumanoidRootPart")
+            local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 
-            if rootPart then
+            if rootPart and not character:GetAttribute("InvisibleToBullets") then
                 local distance = (rootPart.Position - rootPosition).Magnitude
 
                 if distance < nearestDistance then
@@ -175,7 +191,17 @@ local function isVisible(fromPosition, toPosition, ignoreList)
     local ray = Ray.new(fromPosition, direction * distance)
 
     local hit = workspaceService:FindPartOnRayWithIgnoreList(ray, ignoreList)
-    return not hit
+
+    if hit then
+        if hit:GetAttribute("InvisibleToBullets") == true then
+            local newIgnoreList = { unpack(ignoreList) }
+            table.insert(newIgnoreList, hit)
+            return isVisible(fromPosition, toPosition, newIgnoreList)
+        end
+        return false
+    end
+
+    return true
 end
 
 local function getBestTarget(rootPosition)
@@ -196,11 +222,8 @@ local function getBestTarget(rootPosition)
 
     local npcDistance = (npcTarget.Position - rootPosition).Magnitude
     local playerCharacter = playerTarget.Character
-    local playerRoot = playerCharacter
-        and playerCharacter:FindFirstChild("HumanoidRootPart")
-    local playerDistance = playerRoot
-        and (playerRoot.Position - rootPosition).Magnitude
-        or math.huge
+    local playerRoot = playerCharacter and playerCharacter:FindFirstChild("HumanoidRootPart")
+    local playerDistance = playerRoot and (playerRoot.Position - rootPosition).Magnitude or math.huge
 
     if npcDistance <= playerDistance then
         return "npc", npcTarget
@@ -214,8 +237,7 @@ local function handleNPCTarget(target)
 
     if aimPart and aimPosition then
         local character = localPlayer.Character
-        local rootPart = character
-            and character:FindFirstChild("HumanoidRootPart")
+        local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 
         if rootPart then
             local ignoreList = { character, target.Object }
@@ -243,8 +265,7 @@ end
 
 local function handlePlayerTarget(target)
     local character = target.Character
-    local rootPart = character
-        and character:FindFirstChild("HumanoidRootPart")
+    local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 
     if not rootPart then
         return nil, nil
@@ -253,8 +274,7 @@ local function handlePlayerTarget(target)
     local head = character:FindFirstChild("Head")
     if head and head:IsA("BasePart") and head.Parent then
         local localCharacter = localPlayer.Character
-        local localRoot = localCharacter
-            and localCharacter:FindFirstChild("HumanoidRootPart")
+        local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
 
         if localRoot then
             local ignoreList = { localCharacter, character }
@@ -268,6 +288,20 @@ local function handlePlayerTarget(target)
     return rootPart, rootPart.Position
 end
 
+local function calculateAimOverride()
+    local character = localPlayer.Character
+    local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return nil, nil end
+
+    local targetType, target = getBestTarget(rootPart.Position)
+    if targetType == "npc" then
+        return handleNPCTarget(target)
+    elseif targetType == "player" then
+        return handlePlayerTarget(target)
+    end
+    return nil, nil
+end
+
 local function startAim()
     if isHoldingAimKey then
         return
@@ -276,40 +310,35 @@ local function startAim()
     isHoldingAimKey = true
 
     rayModule.RayIgnoreNonCollideWithIgnoreList = function(...)
-        local character = localPlayer.Character
-        local rootPart = character
-            and character:FindFirstChild("HumanoidRootPart")
-
-        if not rootPart then
-            return getgenv().OriginalRaycast(...)
-        end
-
-        local result = {
-            getgenv().OriginalRaycast(...)
-        }
+        local result = { getgenv().OriginalRaycast(...) }
 
         local sourceScript = tostring(getfenv(2).script)
         if sourceScript == "BulletEmitter" or sourceScript == "Taser" then
-            local targetType, target = getBestTarget(rootPart.Position)
-
-            if targetType == "npc" then
-                local aimPart, aimPosition = handleNPCTarget(target)
-
-                if aimPart and aimPosition then
-                    result[1] = aimPart
-                    result[2] = aimPosition
-                end
-            elseif targetType == "player" then
-                local aimPart, aimPosition = handlePlayerTarget(target)
-
-                if aimPart and aimPosition then
-                    result[1] = aimPart
-                    result[2] = aimPosition
-                end
+            local aimPart, aimPosition = calculateAimOverride()
+            if aimPart and aimPosition then
+                result[1] = aimPart
+                result[2] = aimPosition
             end
         end
 
         return unpack(result)
+    end
+
+    if stdRaycastModule then
+        stdRaycastModule.collidable = function(origin, direction, range, raycastParams, collidableFunc)
+            local aimPart, aimPosition = calculateAimOverride()
+
+            if aimPart and aimPosition then
+                return {
+                    Instance = aimPart,
+                    Position = aimPosition,
+                    Material = Enum.Material.Plastic,
+                    Normal = Vector3.new(0, 1, 0)
+                }
+            end
+
+            return getgenv().OriginalStdCollidable(origin, direction, range, raycastParams, collidableFunc)
+        end
     end
 end
 
@@ -320,8 +349,12 @@ local function stopAim()
 
     isHoldingAimKey = false
     npcCache = {}
-    rayModule.RayIgnoreNonCollideWithIgnoreList =
-        getgenv().OriginalRaycast
+    
+    rayModule.RayIgnoreNonCollideWithIgnoreList = getgenv().OriginalRaycast
+
+    if stdRaycastModule and getgenv().OriginalStdCollidable then
+        stdRaycastModule.collidable = getgenv().OriginalStdCollidable
+    end
 end
 
 userInputService.InputBegan:Connect(function(input, gameProcessed)
